@@ -1,82 +1,110 @@
+using System.IdentityModel.Tokens.Jwt;
+using System.Security.Claims;
+using System.Text;
+using JobTrackerApi.Data;
+using JobTrackerApi.Dtos;
+using JobTrackerApi.Models;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
-using JobTrackerApi.Data;
-using JobTrackerApi.Models;
+using Microsoft.IdentityModel.Tokens;
 
 namespace JobTrackerApi.Controllers;
 
 [ApiController]
 [Route("api/[controller]")]
-public class JobApplicationsController : ControllerBase
+public class AuthController : ControllerBase
 {
     private readonly JobTrackerContext _context;
+    private readonly IConfiguration _configuration;
 
-    public JobApplicationsController(JobTrackerContext context)
+    public AuthController(JobTrackerContext context, IConfiguration configuration)
     {
         _context = context;
+        _configuration = configuration;
     }
 
-    [HttpGet]
-    public async Task<ActionResult<List<JobApplication>>> GetAll()
+    [HttpPost("register")]
+    public async Task<ActionResult<AuthResponseDto>> Register(RegisterUserDto registerDto)
     {
-        return await _context.JobApplications.ToListAsync();
-    }
+        var emailExists = await _context.Users
+            .AnyAsync(u => u.Email.ToLower() == registerDto.Email.ToLower());
 
-    [HttpGet("{id}")]
-    public async Task<ActionResult<JobApplication>> GetById(int id)
-    {
-        var application = await _context.JobApplications.FindAsync(id);
-
-        if (application == null)
+        if (emailExists)
         {
-            return NotFound();
+            return BadRequest(new { message = "Email is already registered." });
         }
 
-        return application;
-    }
+        var user = new User
+        {
+            Email = registerDto.Email,
+            PasswordHash = BCrypt.Net.BCrypt.HashPassword(registerDto.Password)
+        };
 
-    [HttpPost]
-    public async Task<ActionResult<JobApplication>> Create(JobApplication newApplication)
-    {
-        _context.JobApplications.Add(newApplication);
+        _context.Users.Add(user);
         await _context.SaveChangesAsync();
 
-        return CreatedAtAction(nameof(GetById), new { id = newApplication.Id }, newApplication);
+        var token = GenerateJwtToken(user);
+
+        return Ok(new AuthResponseDto
+        {
+            Token = token
+        });
     }
 
-    [HttpPut("{id}")]
-    public async Task<IActionResult> Update(int id, JobApplication updatedApplication)
+    [HttpPost("login")]
+    public async Task<ActionResult<AuthResponseDto>> Login(LoginUserDto loginDto)
     {
-        var application = await _context.JobApplications.FindAsync(id);
+        var user = await _context.Users
+            .FirstOrDefaultAsync(u => u.Email.ToLower() == loginDto.Email.ToLower());
 
-        if (application == null)
+        if (user == null)
         {
-            return NotFound();
+            return Unauthorized(new { message = "Invalid email or password." });
         }
 
-        application.Company = updatedApplication.Company;
-        application.Role = updatedApplication.Role;
-        application.Status = updatedApplication.Status;
-        application.AppliedDate = updatedApplication.AppliedDate;
+        var passwordIsValid = BCrypt.Net.BCrypt.Verify(loginDto.Password, user.PasswordHash);
 
-        await _context.SaveChangesAsync();
-
-        return NoContent();
-    }
-
-    [HttpDelete("{id}")]
-    public async Task<IActionResult> Delete(int id)
-    {
-        var application = await _context.JobApplications.FindAsync(id);
-
-        if (application == null)
+        if (!passwordIsValid)
         {
-            return NotFound();
+            return Unauthorized(new { message = "Invalid email or password." });
         }
 
-        _context.JobApplications.Remove(application);
-        await _context.SaveChangesAsync();
+        var token = GenerateJwtToken(user);
 
-        return NoContent();
+        return Ok(new AuthResponseDto
+        {
+            Token = token
+        });
+    }
+
+    private string GenerateJwtToken(User user)
+    {
+        var jwtKey = _configuration["Jwt:Key"];
+        var jwtIssuer = _configuration["Jwt:Issuer"];
+        var jwtAudience = _configuration["Jwt:Audience"];
+
+        if (string.IsNullOrWhiteSpace(jwtKey))
+        {
+            throw new InvalidOperationException("JWT key is missing.");
+        }
+
+        var securityKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(jwtKey));
+        var credentials = new SigningCredentials(securityKey, SecurityAlgorithms.HmacSha256);
+
+        var claims = new[]
+        {
+            new Claim(ClaimTypes.NameIdentifier, user.Id.ToString()),
+            new Claim(ClaimTypes.Email, user.Email)
+        };
+
+        var token = new JwtSecurityToken(
+            issuer: jwtIssuer,
+            audience: jwtAudience,
+            claims: claims,
+            expires: DateTime.UtcNow.AddHours(2),
+            signingCredentials: credentials
+        );
+
+        return new JwtSecurityTokenHandler().WriteToken(token);
     }
 }

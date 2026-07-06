@@ -11,4 +11,5 @@ public class JobTrackerContext : DbContext
     }
 
     public DbSet<JobApplication> JobApplications => Set<JobApplication>();
+    public DbSet<User> Users => Set<User>();
 }
